@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Welcome on DistriCroq</title>
+
+		<!-- mon icon -->
+		<link rel="shortcut icon" href="favicon.ico">
+
+		<!-- mon template.css -->
+		<link rel="stylesheet" type="text/css" href="main.css" media="screen">
+
+	</head>
+
+	<body>
+
+		<header>
+			<h1>
+				Welcome on DistriCroq
+			</h1>
+			<p>Time :  %TIME% </p>
+		</header>
+
+		<!-- contenu de ma page -->
+		<div>
+			<article>
+				<h1>Manual distribution</h1>
+				<p><button>Run</button></p>
+			</article>
+
+			<article>
+				<h1>Distribution Parameters</h1>
+				<section>
+					<h2>Cron expression</h2>
+					<form>
+						<input type="text" id="cron" name="cron" required value="%CRON%"/>
+						<button>Update</button>
+					</form>
+				</section>
+				<section>
+					<h2>Before Back rotation</h2>
+					<form>
+						<input type="text" id="before" name="before" required value="%BEFORE%"/>
+						<button>Update</button>
+					</form>
+				</section>
+				<section>
+					<h2>Forward rotation</h2>
+					<form>
+						<input type="text" id="forward" name="forward" required value="%FORWARD%"/>
+						<button>Update</button>
+					</form>
+				</section>
+				<section>
+					<h2>After Back rotation</h2>
+					<form>
+						<input type="text" id="after" name="after" required value="%AFTER%"/>
+						<button>Update</button>
+					</form>
+				</section>
+			</article>
+		</div>
+
+		<footer>
+			Software hosted here : <a href="https://github.com/GuillaumeEscande/DistriCroq">on Github</a>
+		</footer>
+
+	</body>
+
+</html>
+

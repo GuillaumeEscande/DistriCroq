@@ -1,2 +1,1 @@
 # DistriCroq
-DistriCroq
