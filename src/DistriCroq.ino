@@ -1,11 +1,11 @@
 
 #include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <AccelStepper.h>
-#include <NTPClient.h>
 #include <LittleFS.h>
 #include <EEPROM.h>
 #include <Thread.h>
@@ -13,17 +13,20 @@
 #include <time.h>
 #include <sys/time.h>
 #include <CronAlarms.h>
+#include <sntp.h>
 
 #define STASSID "GuiEtJew"
 #define STAPSK  "lithium est notre chat."
 
-
-#define ENABLE_PIN 0
-#define STEP_PIN 1
-#define DIR_PIN 2
+#define RESET_PIN 2
+#define SLEEP_PIN 4
+#define MS1_PIN 5
+#define ENABLE_PIN 16
+#define STEP_PIN 12
+#define DIR_PIN 14
 
 #define INIT_VALUE 56
-#define DEFAULT_CRON "0 0 2/7-23 ? * * *"
+#define DEFAULT_CRON "0 0 2/7-23 * * *"
 #define DEFAULT_STEP_BACK_BEFORE 150
 #define DEFAULT_STEP_FORWARD -800
 #define DEFAULT_STEP_BACK_AFTER 10
@@ -37,15 +40,13 @@
 const char *ssid = STASSID;
 const char *password = STAPSK;
 
+bool distribute = false;
 
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP);
 AsyncWebServer server(80);
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 ThreadController controller = ThreadController();
-CronId id;
-
-
+CronId id = dtINVALID_ALARM_ID;
 
 String readStringFromEEPROM(int addrOffset)
 {
@@ -70,10 +71,12 @@ void writeStringToEEPROM(int addrOffset, const String &strToWrite)
 }
 
 void wait_motor_end(){
-  while( stepper.run() == true );
+  while( stepper.run() == true )
+    delay(50);
 }
 
-void distribute(){
+void do_distribute(){
+  Serial.println("RUN - Start distribute");
   
   int setBackBefore = 0;
   int setForward = 0;
@@ -82,25 +85,38 @@ void distribute(){
   EEPROM.get(ADDR_STEP_BACK_BEFORE, setBackBefore);
   EEPROM.get(ADDR_STEP_FORWARD, setForward);
   EEPROM.get(ADDR_STEP_BACK_AFTER, setBackAfter);  
-  
+
+  Serial.println("RUN - Enable motors");
   digitalWrite(ENABLE_PIN, LOW);
+  digitalWrite(SLEEP_PIN, HIGH);
   stepper.enableOutputs();
-  
+
+  Serial.print("RUN - go back before : ");
+  Serial.println(setBackBefore);
   stepper.move(setBackBefore);
-  wait_motor_end();
+  stepper.runToPosition();
+
+  Serial.print("RUN - go set forward : ");
+  Serial.println(setForward);
   stepper.move(setForward);
-  wait_motor_end();
+  stepper.runToPosition();
+
+  Serial.print("RUN - go back after : ");
+  Serial.println(setBackAfter);
   stepper.move(setBackAfter);
-  wait_motor_end();
+  stepper.runToPosition();
   
-  digitalWrite(ENABLE_PIN, HIGH);
+  Serial.println("RUN - Disable motors");
   stepper.disableOutputs();
+  digitalWrite(SLEEP_PIN, LOW);
+  digitalWrite(ENABLE_PIN, HIGH);
+  Serial.println("RUN - End distribute");
 }
 
 String processor(const String& var){
-  Serial.println(var);
   if(var == "TIME"){
-    return timeClient.getFormattedTime();
+    time_t now = time(nullptr);
+    return ctime(&now);
   } else if(var == "CRON"){
     return readStringFromEEPROM(ADDR_CRON);
   } else if(var == "BEFORE"){
@@ -119,10 +135,23 @@ String processor(const String& var){
   return "Unknown";
 }
 
-void updateVars(const AsyncWebServerRequest *request){
+void updateCron(){
+  Serial.println("RUN - updateCron");
+  Cron.free(id);
+  String cronExpression = readStringFromEEPROM(ADDR_CRON);
+  Serial.println(cronExpression);
+  id = Cron.create(cronExpression.c_str(), [](){
+    distribute = true;
+  }, false);
+  Serial.println("RUN - updateCron - OK");
+}
 
-  if (request->hasParam("cron")) {
-    updateCron(request->getParam("cron")->value());
+void updateVars(const AsyncWebServerRequest *request){
+  Serial.println("RUN - updateVars");
+  if (request->hasParam("cron")){
+    writeStringToEEPROM(ADDR_CRON, request->getParam("cron")->value());
+    EEPROM.commit();
+    updateCron();
   }
   if (request->hasParam("before")) {
     EEPROM.put(ADDR_STEP_BACK_BEFORE, (int)request->getParam("before")->value().toInt());
@@ -135,61 +164,84 @@ void updateVars(const AsyncWebServerRequest *request){
   }
     
   EEPROM.commit();
+  Serial.println("RUN - updateVars - OK");
 
 }
 
-void updateCron(String cronexpr){
-  writeStringToEEPROM(ADDR_CRON, cronexpr);
-  Cron.free(id);
-  id = Cron.create(cronexpr.c_str(), distribute, false);
-}
 
-
-Thread ntpThread = Thread();
 Thread motorThread = Thread();
+Thread cronThread = Thread();
 
 
 void setup(void) {
+
+  Serial.begin(115200);
+  Serial.println("INIT - Start");
+
   // Init EEPREOM
   EEPROM.begin(ADDR_STEP_BACK_AFTER + sizeof(int));
 
   // Init EEPROM vars :
   if( EEPROM.read(ADDR_INIT) != INIT_VALUE){
+    Serial.println("INIT - Reset EEPROM value");
     EEPROM.write(ADDR_INIT, INIT_VALUE);
     EEPROM.put(ADDR_STEP_BACK_BEFORE, (int)DEFAULT_STEP_BACK_BEFORE);
     EEPROM.put(ADDR_STEP_FORWARD, (int)DEFAULT_STEP_FORWARD);
     EEPROM.put(ADDR_STEP_BACK_AFTER, (int)DEFAULT_STEP_BACK_AFTER);
-    updateCron(DEFAULT_CRON);
+    writeStringToEEPROM(ADDR_CRON, DEFAULT_CRON);
     EEPROM.commit();
   }
   
 
 
   // Init stepper motor
+  Serial.println("INIT - Init Stepper Motor");
+  pinMode(RESET_PIN, OUTPUT);
+  pinMode(SLEEP_PIN, OUTPUT);
+  pinMode(MS1_PIN, OUTPUT);
   pinMode(ENABLE_PIN, OUTPUT);
   pinMode(STEP_PIN, OUTPUT);
   pinMode(DIR_PIN, OUTPUT);
-  stepper.setMaxSpeed(3000);
-  stepper.setAcceleration(1000);
-  
+  stepper.setMaxSpeed(300);
+  stepper.setAcceleration(100); 
+  digitalWrite(RESET_PIN, LOW);
+  digitalWrite(MS1_PIN, LOW);
   digitalWrite(ENABLE_PIN, HIGH);
+  digitalWrite(SLEEP_PIN, LOW);
+  delay(50);  
+  digitalWrite(RESET_PIN, HIGH);
   stepper.disableOutputs();
+  Serial.println("INIT - Init Stepper Motor - OK");
 
   // Init Wifi
+  Serial.println("INIT - Init Wifi");
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-
-  // Init FS
-  LittleFS.begin();
 
   // Wait for connection
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }
+  Serial.print("INIT - Wifi Connected : ");
+  Serial.println(WiFi.localIP());
   
+  // Init mDNS
+  if (MDNS.begin("districroq")) {
+    Serial.println("INIT - mDNS OK");
+  }
+
+  // Init FS
+  Serial.println("INIT - LittleFS");
+  LittleFS.begin();
+  
+
+  Serial.println("INIT - Route init");
   // Route for root / web page
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     updateVars(request);
+    if (request->hasParam("distribute")) {
+      distribute = true;
+    }
     request->send(LittleFS, "/index.html", String(), false, processor);
   });
   
@@ -203,41 +255,58 @@ void setup(void) {
     request->send(LittleFS, "/main.css", "text/css");
   });
   
-  // Route to set GPIO to HIGH
   server.on("/distribute", HTTP_GET, [](AsyncWebServerRequest *request){
-    distribute();
-    request->send(200, "text/plain", "distribute done");
+    request->send(200, "text/plain", "distribute started");
+    distribute = true;
+  });
+  
+  server.on("/date", HTTP_GET, [](AsyncWebServerRequest *request){
+    time_t now = time(nullptr);
+    request->send(200, "text/plain", ctime(&now));
   });
 
 
   server.onNotFound( [](AsyncWebServerRequest *request){
     request->send(404, "text/plain", "Not found");
   });
+  Serial.println("INIT - Route init - OK");
 
   // Start server
   server.begin();
+  Serial.println("INIT - HTTP Server started");
 
   // Start NTP
-  timeClient.begin();
-  timeClient.update();
+  Serial.println("INIT - NTP start");
+  sntp_setoperatingmode(SNTP_OPMODE_POLL);
+  ip4_addr ipaddr;
+  IP4_ADDR(&ipaddr, 176,31,251,158);
+	sntp_setserver(0, &ipaddr);
+	sntp_init();
+  Serial.println("INIT - NTP start - OK");
 
-
-  ntpThread.setInterval(60000);
-  ntpThread.onRun( []() {
-    timeClient.update();
-  });
-  
+  cronThread.setInterval(100);
   motorThread.onRun( []() {
-    stepper.run();
+    //stepper.run();
+    if(distribute){
+      distribute = false;
+      do_distribute();
+    }
+      
+  });
+
+  cronThread.setInterval(100);
+  cronThread.onRun( []() {
+    Cron.delay();
   });
   
   
-  controller.add(&ntpThread); 
   controller.add(&motorThread); 
+  controller.add(&cronThread); 
+
+  updateCron();
   
 }
 
 void loop(void) {
-  
   controller.run();
 }
